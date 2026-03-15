@@ -194,6 +194,79 @@ app.get('/tokens', (req, res) => {
   res.json(getSupportedTokens());
 });
 
+// Balance proxy — server-side RPC, no CORS issues for client
+const SOLANA_RPC = process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
+
+const SPL_TOKENS = {
+  TOWEL:     { mint: 'Ak9ptp86tfJMrKwBwoe49pNkHxPjZk8GRQxZKB78pump', decimals: 6 },
+  METATOWEL: { mint: 'CtsDk7Mo1wwhxhQp6zqB2oHEFXPEHhgjTBE8VvcUpump', decimals: 6 },
+  MARVIN:    { mint: '91gCUo2EY9sXNCTioG2AbCCTyraNn9zXvX5HF9qnpump', decimals: 6 },
+};
+
+async function rpc(method, params, retries = 3) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(SOLANA_RPC, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+        signal: AbortSignal.timeout(8000),
+      });
+      const json = await res.json();
+      if (json.error) {
+        const msg = json.error.message || JSON.stringify(json.error);
+        if (attempt < retries && (msg.includes('Too many') || msg.includes('429') || msg.includes('rate'))) {
+          await new Promise(r => setTimeout(r, 300 * attempt));
+          continue;
+        }
+        throw new Error(msg);
+      }
+      return json.result;
+    } catch (err) {
+      if (attempt === retries) throw err;
+      await new Promise(r => setTimeout(r, 300 * attempt));
+    }
+  }
+}
+
+app.get('/balance/:address', async (req, res) => {
+  const { address } = req.params;
+  try {
+    // SOL balance
+    const solResult = await rpc('getBalance', [address, { commitment: 'confirmed' }]);
+    const sol = (solResult?.value ?? 0) / 1e9;
+
+    // Query both classic SPL and Token-2022 program accounts
+    const TOKEN_PROGRAM    = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
+    const TOKEN_2022       = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
+
+    const [splResult, t22Result] = await Promise.all([
+      rpc('getTokenAccountsByOwner', [address, { programId: TOKEN_PROGRAM }, { encoding: 'jsonParsed', commitment: 'confirmed' }]),
+      rpc('getTokenAccountsByOwner', [address, { programId: TOKEN_2022 },    { encoding: 'jsonParsed', commitment: 'confirmed' }]),
+    ]);
+
+    const tokenAccounts = [
+      ...(splResult?.value ?? []),
+      ...(t22Result?.value ?? []),
+    ];
+
+    const balances = { SOL: sol };
+
+    for (const [symbol, { mint, decimals }] of Object.entries(SPL_TOKENS)) {
+      const acct = tokenAccounts.find(
+        (a) => a.account?.data?.parsed?.info?.mint === mint
+      );
+      const raw = acct?.account?.data?.parsed?.info?.tokenAmount?.amount ?? '0';
+      balances[symbol] = Number(raw) / 10 ** decimals;
+    }
+
+    res.json({ address, balances });
+  } catch (err) {
+    console.error('[balance]', err.message);
+    res.status(502).json({ error: 'Failed to fetch balance', detail: err.message });
+  }
+});
+
 const PORT = process.env.PORT || 3094;
 app.listen(PORT, () => {
   console.log(`[ConvictionVault] API running on port ${PORT}`);

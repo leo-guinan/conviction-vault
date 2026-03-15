@@ -1,8 +1,10 @@
 services:
   conviction-api:
-    build: .
+    image: node:22
     container_name: conviction-api
     restart: unless-stopped
+    working_dir: /app
+    command: node server/api.mjs
     ports:
       - "3096:3096"
     environment:
@@ -10,8 +12,12 @@ services:
       - DRY_RUN=true
       - PLATFORM_SOLANA_WALLET=BCiPx7CbD3ZrcETcGTEGjTWtCwAbotNPPmdqmB9zAseq
       - DRIP_TOKEN_MINT=EiW9cxqFuLfJbLGXL7vZ7rcqtFLmDf13ho5oE6YKBAGS
+      - SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=d4080ac6-e95a-4201-8d43-0c6abdad40eb
     volumes:
+      - ./server:/app/server
       - ./data:/app/data
+      - ./node_modules:/app/node_modules
+      - ./package.json:/app/package.json
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.conviction-api.rule=Host(`conviction.metaspn.network`) && PathPrefix(`/api`)"
@@ -28,15 +34,18 @@ services:
     container_name: conviction-frontend
     restart: unless-stopped
     working_dir: /app
-    command: sh -c "npm ci --omit=dev && npm start"
+    command: node server.js
     ports:
       - "3097:3000"
     environment:
       - NODE_ENV=production
       - NEXT_PUBLIC_API_URL=https://conviction.metaspn.network/api
       - PORT=3000
+      - HOSTNAME=0.0.0.0
     volumes:
-      - ./frontend:/app
+      - ./frontend/.next/standalone/conviction-vault/frontend:/app
+      - ./frontend/.next/static:/app/.next/static
+      - ./frontend/public:/app/public
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.conviction.rule=Host(`conviction.metaspn.network`)"

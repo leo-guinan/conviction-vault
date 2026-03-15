@@ -50,7 +50,7 @@ const TOKEN_UNIVERSE = {
   },
 };
 
-const JUPITER_PRICE_API = 'https://price.jup.ag/v2/price';
+const JUPITER_PRICE_API = 'https://price.jup.ag/v4/price';
 const JUPITER_QUOTE_API = 'https://quote-api.jup.ag/v6/quote';
 const JUPITER_SWAP_API = 'https://quote-api.jup.ag/v6/swap';
 
@@ -70,6 +70,24 @@ export function getBaseTokens() {
   return Object.values(TOKEN_UNIVERSE).filter((t) => t.chain === 'BASE');
 }
 
+async function getPriceFromDexScreener(tokenMint) {
+  try {
+    const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const pair = data.pairs?.[0];
+    if (!pair?.priceUsd) return null;
+    return {
+      mint: tokenMint,
+      symbol: pair.baseToken?.symbol || tokenMint.slice(0, 6),
+      priceUsd: parseFloat(pair.priceUsd),
+      timestamp: Date.now(),
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function getPrice(tokenMint) {
   const token = getTokenByMint(tokenMint);
   if (token && token.chain === 'BASE') {
@@ -77,22 +95,27 @@ export async function getPrice(tokenMint) {
     return null;
   }
 
+  // Try Jupiter first, fall back to DexScreener for pump.fun / unlisted tokens
   try {
     const res = await fetch(`${JUPITER_PRICE_API}?ids=${tokenMint}`);
-    if (!res.ok) throw new Error(`Jupiter Price API returned ${res.status}`);
-    const data = await res.json();
-    const priceData = data.data?.[tokenMint];
-    if (!priceData) return null;
-    return {
-      mint: tokenMint,
-      symbol: priceData.mintSymbol,
-      priceUsd: priceData.price,
-      timestamp: Date.now(),
-    };
-  } catch (err) {
-    console.error(`[Jupiter] Price fetch failed for ${tokenMint}:`, err.message);
-    return null;
+    if (res.ok) {
+      const data = await res.json();
+      const priceData = data.data?.[tokenMint];
+      if (priceData) {
+        return {
+          mint: tokenMint,
+          symbol: priceData.mintSymbol,
+          priceUsd: priceData.price,
+          timestamp: Date.now(),
+        };
+      }
+    }
+  } catch {
+    // fall through to DexScreener
   }
+
+  console.warn(`[Jupiter] Falling back to DexScreener for ${tokenMint}`);
+  return getPriceFromDexScreener(tokenMint);
 }
 
 export async function getQuote(inputMint, outputMint, amountLamports) {

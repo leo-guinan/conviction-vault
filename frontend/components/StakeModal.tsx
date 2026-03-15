@@ -1,9 +1,8 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { useWallet } from '@solana/wallet-adapter-react';
+import { useWallet, useConnection } from '@solana/wallet-adapter-react';
 import { useWalletModal } from '@solana/wallet-adapter-react-ui';
-import { useConnection } from '@solana/wallet-adapter-react';
 import {
   PublicKey,
   Transaction,
@@ -13,10 +12,15 @@ import {
 import {
   getAssociatedTokenAddress,
   createTransferInstruction,
+  createAssociatedTokenAccountInstruction,
   getAccount,
+  TOKEN_2022_PROGRAM_ID,
+  ASSOCIATED_TOKEN_PROGRAM_ID,
 } from '@solana/spl-token';
 import { PLATFORM_WALLET } from '@/lib/wallet';
 import { stake } from '@/lib/api';
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'https://conviction.metaspn.network/api';
 
 interface TokenOption {
   symbol: string;
@@ -25,11 +29,22 @@ interface TokenOption {
 }
 
 const SUPPORTED_TOKENS: TokenOption[] = [
-  { symbol: 'SOL', mint: 'native', decimals: 9 },
-  { symbol: 'TOWEL', mint: 'Ak9ptp86tfJMrKwBwoe49pNkHxPjZk8GRQxZKB78pump', decimals: 6 },
-  { symbol: 'METATOWEL', mint: 'CtsDk7Mo1wwhxhQp6zqB2oHEFXPEHhgjTBE8VvcUpump', decimals: 6 },
-  { symbol: 'MARVIN', mint: '91gCUo2EY9sXNCTioG2AbCCTyraNn9zXvX5HF9qnpump', decimals: 6 },
+  { symbol: 'SOL',       mint: 'native',                                           decimals: 9 },
+  { symbol: 'TOWEL',     mint: 'Ak9ptp86tfJMrKwBwoe49pNkHxPjZk8GRQxZKB78pump',   decimals: 6 },
+  { symbol: 'METATOWEL', mint: 'CtsDk7Mo1wwhxhQp6zqB2oHEFXPEHhgjTBE8VvcUpump',   decimals: 6 },
+  { symbol: 'MARVIN',    mint: '91gCUo2EY9sXNCTioG2AbCCTyraNn9zXvX5HF9qnpump',   decimals: 6 },
 ];
+
+// All pump.fun tokens use Token-2022 program
+const TOKEN_2022_MINTS = new Set([
+  'Ak9ptp86tfJMrKwBwoe49pNkHxPjZk8GRQxZKB78pump',
+  'CtsDk7Mo1wwhxhQp6zqB2oHEFXPEHhgjTBE8VvcUpump',
+  '91gCUo2EY9sXNCTioG2AbCCTyraNn9zXvX5HF9qnpump',
+]);
+
+function tokenProgramId(mint: string) {
+  return TOKEN_2022_MINTS.has(mint) ? TOKEN_2022_PROGRAM_ID : undefined; // undefined = classic SPL
+}
 
 type StakeStep = 'input' | 'pending' | 'success' | 'error';
 
@@ -48,30 +63,29 @@ export default function StakeModal({ vaultId, vaultName, onClose, onStaked }: St
   const [selectedToken, setSelectedToken] = useState(SUPPORTED_TOKENS[0]);
   const [amount, setAmount] = useState('');
   const [balance, setBalance] = useState<number | null>(null);
+  const [balanceLoading, setBalanceLoading] = useState(false);
   const [step, setStep] = useState<StakeStep>('input');
   const [txSignature, setTxSignature] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
 
   const fetchBalance = useCallback(async () => {
     if (!publicKey) return;
+    setBalanceLoading(true);
+    setBalance(null);
     try {
-      if (selectedToken.mint === 'native') {
-        const bal = await connection.getBalance(publicKey);
-        setBalance(bal / LAMPORTS_PER_SOL);
-      } else {
-        const mintPubkey = new PublicKey(selectedToken.mint);
-        const ata = await getAssociatedTokenAddress(mintPubkey, publicKey);
-        try {
-          const account = await getAccount(connection, ata);
-          setBalance(Number(account.amount) / 10 ** selectedToken.decimals);
-        } catch {
-          setBalance(0);
-        }
-      }
-    } catch {
+      // Proxy through our own API — no CORS, no rate limits
+      const res = await fetch(`${API_URL}/balance/${publicKey.toString()}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const bal = data.balances?.[selectedToken.symbol];
+      setBalance(typeof bal === 'number' ? bal : null);
+    } catch (e) {
+      console.error('Balance fetch failed:', e);
       setBalance(null);
+    } finally {
+      setBalanceLoading(false);
     }
-  }, [publicKey, selectedToken, connection]);
+  }, [publicKey, selectedToken]);
 
   useEffect(() => {
     fetchBalance();
@@ -113,12 +127,32 @@ export default function StakeModal({ vaultId, vaultName, onClose, onStaked }: St
         );
       } else {
         const mintPubkey = new PublicKey(selectedToken.mint);
-        const sourceAta = await getAssociatedTokenAddress(mintPubkey, publicKey);
-        const destAta = await getAssociatedTokenAddress(mintPubkey, platformPubkey);
+        const progId = tokenProgramId(selectedToken.mint);
+        const ataOpts = progId ? { tokenProgramId: progId } : {};
+
+        const sourceAta = await getAssociatedTokenAddress(mintPubkey, publicKey,       false, progId);
+        const destAta   = await getAssociatedTokenAddress(mintPubkey, platformPubkey,  true,  progId); // true = allowOwnerOffCurve (Squads PDA)
         const rawAmount = BigInt(Math.round(numAmount * 10 ** selectedToken.decimals));
 
+        // Create destination ATA if it doesn't exist yet
+        try {
+          await getAccount(connection, destAta, 'confirmed', progId);
+        } catch {
+          // Destination ATA doesn't exist — create it (payer = user, owner = platform PDA)
+          transaction.add(
+            createAssociatedTokenAccountInstruction(
+              publicKey,      // payer
+              destAta,        // ata address
+              platformPubkey, // owner (Squads PDA — off curve is fine for ATAs)
+              mintPubkey,
+              progId,
+              ASSOCIATED_TOKEN_PROGRAM_ID,
+            )
+          );
+        }
+
         transaction.add(
-          createTransferInstruction(sourceAta, destAta, publicKey, rawAmount)
+          createTransferInstruction(sourceAta, destAta, publicKey, rawAmount, [], progId)
         );
       }
 
@@ -129,7 +163,7 @@ export default function StakeModal({ vaultId, vaultName, onClose, onStaked }: St
       await stake({
         vault_id: vaultId,
         staker_address: publicKey.toString(),
-        token_mint: selectedToken.symbol,
+        token_mint: selectedToken.mint === 'native' ? 'SOL' : selectedToken.mint,
         token_amount: numAmount,
       });
 
@@ -137,7 +171,13 @@ export default function StakeModal({ vaultId, vaultName, onClose, onStaked }: St
       setStep('success');
       onStaked();
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Transaction failed';
+      let msg = 'Transaction failed. Please try again.';
+      if (err instanceof Error) {
+        msg = err.message;
+        // Trim verbose Phantom error prefixes
+        msg = msg.replace(/^.*?Error:\s*/i, '').slice(0, 200);
+      }
+      console.error('Stake error:', err);
       setErrorMsg(msg);
       setStep('error');
     }
@@ -189,25 +229,33 @@ export default function StakeModal({ vaultId, vaultName, onClose, onStaked }: St
                 placeholder="0.00"
                 className="w-full bg-gray-800 border border-gray-700 text-white rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
               />
-              {balance !== null && (
+              {connected && (
                 <p className="text-xs text-gray-500 mt-1">
-                  Balance: {balance.toFixed(4)} {selectedToken.symbol}
-                  <button
-                    onClick={() => setAmount(balance.toString())}
-                    className="text-indigo-400 ml-2 hover:underline"
-                  >
-                    Max
-                  </button>
+                  {balanceLoading ? (
+                    <span className="text-gray-600">Fetching balance...</span>
+                  ) : balance !== null ? (
+                    <>
+                      Balance: {balance.toFixed(4)} {selectedToken.symbol}
+                      <button
+                        onClick={() => setAmount(balance.toString())}
+                        className="text-indigo-400 ml-2 hover:underline"
+                      >
+                        Max
+                      </button>
+                    </>
+                  ) : (
+                    <span className="text-red-400">Could not fetch balance</span>
+                  )}
                 </p>
               )}
             </div>
 
             <button
               onClick={handleStake}
-              disabled={!connected}
+              disabled={!connected || balanceLoading || balance === null}
               className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white py-2.5 rounded-lg text-sm font-medium transition-colors cursor-pointer disabled:cursor-not-allowed"
             >
-              Stake {selectedToken.symbol}
+              {balanceLoading ? 'Loading balance...' : `Stake ${selectedToken.symbol}`}
             </button>
           </div>
         )}
@@ -248,7 +296,7 @@ export default function StakeModal({ vaultId, vaultName, onClose, onStaked }: St
         {step === 'error' && (
           <div className="py-4">
             <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3 text-red-400 text-sm mb-4">
-              {errorMsg}
+              {errorMsg || 'Transaction failed. Please try again.'}
             </div>
             <button
               onClick={() => setStep('input')}
