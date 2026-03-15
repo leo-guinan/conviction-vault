@@ -1,6 +1,16 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
+import fs from 'fs';
+import path from 'path';
+import {
+  Connection, Keypair, PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL,
+} from '@solana/web3.js';
+import {
+  getAssociatedTokenAddress, createTransferInstruction,
+  createAssociatedTokenAccountInstruction, getAccount,
+  TOKEN_2022_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID,
+} from '@solana/spl-token';
 import {
   initDb, getAllVaults, getVaultById, getStakesByVault,
   getStakesByAddress, createStake, updateStakeStatus,
@@ -9,6 +19,67 @@ import {
 } from './db.mjs';
 import { calculateShares, estimateExitValue, calculateExitPenaltyDistribution } from './shares.mjs';
 import { getPrice, getTokenByMint, getSupportedTokens } from './jupiter.mjs';
+
+// --- Hot wallet setup ---
+const HELIUS_RPC = process.env.HELIUS_RPC_URL || 'https://mainnet.helius-rpc.com/?api-key=demo';
+const connection = new Connection(HELIUS_RPC, 'confirmed');
+
+// Token-2022 pump.fun mints
+const TOKEN_2022_MINTS = new Set([
+  'Ak9ptp86tfJMrKwBwoe49pNkHxPjZk8GRQxZKB78pump',
+  'CtsDk7Mo1wwhxhQp6zqB2oHEFXPEHhgjTBE8VvcUpump',
+  '91gCUo2EY9sXNCTioG2AbCCTyraNn9zXvX5HF9qnpump',
+]);
+
+function loadHotWallet() {
+  const walletPath = process.env.PLATFORM_SOLANA_HOT_WALLET_PATH ||
+    path.join(process.env.HOME, '.marvin/secrets/vault-hot-wallet.json');
+  const raw = JSON.parse(fs.readFileSync(walletPath, 'utf8'));
+  return Keypair.fromSecretKey(Uint8Array.from(raw.secretKey));
+}
+
+async function sendTokensFromVault(toAddress, tokenMint, tokenAmount) {
+  const hotWallet = loadHotWallet();
+  const toPubkey = new PublicKey(toAddress);
+  const tx = new Transaction();
+
+  if (tokenMint === 'SOL' || tokenMint === 'native') {
+    tx.add(SystemProgram.transfer({
+      fromPubkey: hotWallet.publicKey,
+      toPubkey,
+      lamports: Math.round(tokenAmount * LAMPORTS_PER_SOL),
+    }));
+  } else {
+    const mintPubkey = new PublicKey(tokenMint);
+    const progId = TOKEN_2022_MINTS.has(tokenMint) ? TOKEN_2022_PROGRAM_ID : undefined;
+    const sourceAta = await getAssociatedTokenAddress(mintPubkey, hotWallet.publicKey, false, progId);
+    const destAta   = await getAssociatedTokenAddress(mintPubkey, toPubkey, false, progId);
+    const token = getTokenByMint(tokenMint);
+    const decimals = token?.decimals ?? 6;
+    const rawAmount = BigInt(Math.round(tokenAmount * 10 ** decimals));
+
+    // Create dest ATA if needed
+    try {
+      await getAccount(connection, destAta, 'confirmed', progId);
+    } catch {
+      tx.add(createAssociatedTokenAccountInstruction(
+        hotWallet.publicKey, destAta, toPubkey, mintPubkey,
+        progId, ASSOCIATED_TOKEN_PROGRAM_ID,
+      ));
+    }
+
+    tx.add(createTransferInstruction(sourceAta, destAta, hotWallet.publicKey, rawAmount, [], progId));
+  }
+
+  const { blockhash } = await connection.getLatestBlockhash();
+  tx.recentBlockhash = blockhash;
+  tx.feePayer = hotWallet.publicKey;
+  tx.sign(hotWallet);
+
+  const sig = await connection.sendRawTransaction(tx.serialize());
+  await connection.confirmTransaction(sig, 'confirmed');
+  return sig;
+}
 
 const app = express();
 app.use(cors());
@@ -153,11 +224,14 @@ app.post('/exit', async (req, res) => {
     const exitEstimate = await estimateExitValue(stake_id);
     if (!exitEstimate) return res.status(500).json({ error: 'Could not estimate exit value' });
 
-    // Apply penalty and distribute to remaining stakers
+    // returnAmount is staked tokens minus exit penalty (penalty stays in vault for remaining stakers)
+    const returnTokens = exitEstimate.returnTokens ?? stake.token_amount * (1 - (exitEstimate.exitPenaltyPct ?? 0.05));
+
+    // Record penalty distribution to remaining stakers
     const penaltyDistribution = calculateExitPenaltyDistribution(
       exitEstimate.exitPenalty,
       stake.vault_id,
-      stake_id
+      stake_id,
     );
 
     createExitPenalty({
@@ -167,14 +241,30 @@ app.post('/exit', async (req, res) => {
       distributed_to_remaining_stakers: penaltyDistribution,
     });
 
+    let txSignature = null;
+
+    if (process.env.DRY_RUN !== 'false') {
+      // Dry run — mark exited but don't send tokens
+      console.log(`[DRY_RUN] Would return ${returnTokens} of ${stake.token_mint} to ${staker_address}`);
+    } else {
+      // Live — send tokens back on-chain
+      txSignature = await sendTokensFromVault(staker_address, stake.token_mint, returnTokens);
+      console.log(`[EXIT] Returned ${returnTokens} ${stake.token_mint} to ${staker_address} — tx: ${txSignature}`);
+    }
+
     updateStakeStatus(stake_id, 'exited');
 
     res.json({
       ...exitEstimate,
+      return_tokens: returnTokens,
+      token_mint: stake.token_mint,
       penalty_distributed_to: penaltyDistribution.length,
+      tx_signature: txSignature,
+      solscan: txSignature ? `https://solscan.io/tx/${txSignature}` : null,
       mode: process.env.DRY_RUN !== 'false' ? 'DRY_RUN' : 'LIVE',
     });
   } catch (err) {
+    console.error('[EXIT ERROR]', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -267,8 +357,41 @@ app.get('/balance/:address', async (req, res) => {
   }
 });
 
+// --- Admin: sweep accumulated fees to Squads treasury ---
+app.post('/admin/sweep', async (req, res) => {
+  try {
+    const { admin_key, token_mint, amount } = req.body;
+    if (admin_key !== process.env.ADMIN_KEY) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    if (!token_mint || !amount) {
+      return res.status(400).json({ error: 'Missing token_mint or amount' });
+    }
+    const squadsTreasury = process.env.SQUADS_TREASURY;
+    if (!squadsTreasury) {
+      return res.status(500).json({ error: 'SQUADS_TREASURY not configured' });
+    }
+
+    const txSig = await sendTokensFromVault(squadsTreasury, token_mint, amount);
+    console.log(`[SWEEP] Sent ${amount} ${token_mint} to Squads treasury — tx: ${txSig}`);
+
+    res.json({
+      swept: amount,
+      token_mint,
+      to: squadsTreasury,
+      tx_signature: txSig,
+      solscan: `https://solscan.io/tx/${txSig}`,
+    });
+  } catch (err) {
+    console.error('[SWEEP ERROR]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 const PORT = process.env.PORT || 3094;
 app.listen(PORT, () => {
   console.log(`[ConvictionVault] API running on port ${PORT}`);
+  console.log(`[ConvictionVault] Hot wallet: ${process.env.PLATFORM_SOLANA_WALLET}`);
+  console.log(`[ConvictionVault] Squads treasury: ${process.env.SQUADS_TREASURY}`);
   console.log(`[ConvictionVault] Mode: ${process.env.DRY_RUN !== 'false' ? 'DRY_RUN' : 'LIVE'}`);
 });
