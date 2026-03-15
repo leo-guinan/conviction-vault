@@ -1,0 +1,20 @@
+{
+  "name": "conviction-vault",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Solana-native cross-chain conviction staking platform",
+  "scripts": {
+    "start": "node server/api.mjs",
+    "dev": "node --watch server/api.mjs",
+    "yield-cron": "node scripts/yield-cron.mjs",
+    "seed": "node server/seed.mjs"
+  },
+  "dependencies": {
+    "sql.js": "^1.11.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "node-cron": "^3.0.3",
+    "uuid": "^11.1.0"
+  }
+}
