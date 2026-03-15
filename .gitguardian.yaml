@@ -1,0 +1,7 @@
+# Ignore Solana public addresses (base58) — not secrets, just public keys
+# GitGuardian flags these as high-entropy generics
+ignore-paths:
+  - SPEC.md
+  - README.md
+  - server/jupiter.mjs
+  - frontend/lib/tokens.ts
