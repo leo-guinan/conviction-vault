@@ -2,11 +2,10 @@
 
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
-import { fetchVault, stake } from "@/lib/api";
-import { getWallet } from "@/lib/wallet";
-import { TOKEN_MAP, formatLabel } from "@/lib/tokens";
+import { fetchVault } from "@/lib/api";
 import PortfolioWeightBar from "@/components/PortfolioWeightBar";
 import YieldHistoryTable from "@/components/YieldHistoryTable";
+import StakeModal from "@/components/StakeModal";
 
 export default function VaultDetailPage() {
   const params = useParams();
@@ -15,12 +14,7 @@ export default function VaultDetailPage() {
   const [vault, setVault] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  // Stake form
-  const [selectedToken, setSelectedToken] = useState("SOL");
-  const [amount, setAmount] = useState("");
-  const [staking, setStaking] = useState(false);
-  const [stakeMsg, setStakeMsg] = useState<string | null>(null);
+  const [showStakeModal, setShowStakeModal] = useState(false);
 
   useEffect(() => {
     fetchVault(id)
@@ -29,35 +23,11 @@ export default function VaultDetailPage() {
       .finally(() => setLoading(false));
   }, [id]);
 
-  async function handleStake() {
-    const wallet = getWallet();
-    if (!wallet) {
-      setStakeMsg("Connect your wallet first.");
-      return;
-    }
-    if (!amount || Number(amount) <= 0) {
-      setStakeMsg("Enter a valid amount.");
-      return;
-    }
-    setStaking(true);
-    setStakeMsg(null);
+  async function refreshVault() {
     try {
-      await stake({
-        vault_id: id,
-        staker_address: wallet,
-        token_mint: selectedToken,
-        token_amount: Number(amount),
-      });
-      setStakeMsg("Stake submitted successfully!");
-      setAmount("");
-      // Refresh vault data
       const updated = await fetchVault(id);
       setVault(updated);
-    } catch {
-      setStakeMsg("Stake failed. Please try again.");
-    } finally {
-      setStaking(false);
-    }
+    } catch {}
   }
 
   if (loading) {
@@ -108,39 +78,15 @@ export default function VaultDetailPage() {
         <PortfolioWeightBar weights={vault.portfolio_weights || []} />
       </div>
 
-      {/* Stake Form */}
+      {/* Stake Button */}
       <div className="bg-gray-900/80 border border-gray-800 rounded-xl p-5">
         <h2 className="text-lg font-semibold text-white mb-4">Stake</h2>
-        <div className="flex flex-col sm:flex-row gap-3">
-          <select
-            value={selectedToken}
-            onChange={(e) => setSelectedToken(e.target.value)}
-            className="bg-gray-800 border border-gray-700 text-white rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
-          >
-            {Object.keys(TOKEN_MAP).map((t) => (
-              <option key={t} value={t}>{formatLabel(t)}</option>
-            ))}
-          </select>
-          <input
-            type="number"
-            value={amount}
-            onChange={(e) => setAmount(e.target.value)}
-            placeholder="Amount"
-            className="bg-gray-800 border border-gray-700 text-white rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500 flex-1"
-          />
-          <button
-            onClick={handleStake}
-            disabled={staking}
-            className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white px-6 py-2 rounded-lg text-sm font-medium transition-colors cursor-pointer disabled:cursor-not-allowed"
-          >
-            {staking ? "Staking..." : "Stake"}
-          </button>
-        </div>
-        {stakeMsg && (
-          <p className={`text-sm mt-3 ${stakeMsg.includes("success") ? "text-green-400" : "text-amber-400"}`}>
-            {stakeMsg}
-          </p>
-        )}
+        <button
+          onClick={() => setShowStakeModal(true)}
+          className="bg-indigo-600 hover:bg-indigo-500 text-white px-6 py-2.5 rounded-lg text-sm font-medium transition-colors cursor-pointer"
+        >
+          Stake in this Vault
+        </button>
       </div>
 
       {/* Yield History */}
@@ -148,6 +94,15 @@ export default function VaultDetailPage() {
         <h2 className="text-lg font-semibold text-white mb-4">Yield History</h2>
         <YieldHistoryTable history={vault.yield_history || []} />
       </div>
+
+      {showStakeModal && (
+        <StakeModal
+          vaultId={id}
+          vaultName={vault.name || id}
+          onClose={() => setShowStakeModal(false)}
+          onStaked={refreshVault}
+        />
+      )}
     </div>
   );
 }

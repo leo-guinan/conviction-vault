@@ -1,16 +1,9 @@
-const WALLET_KEY = "conviction_vault_wallet";
+import { Connection, clusterApiUrl } from '@solana/web3.js';
 
-export function getWallet(): string | null {
-  if (typeof window === "undefined") return null;
-  return localStorage.getItem(WALLET_KEY);
-}
+export const SOLANA_NETWORK = 'mainnet-beta';
+export const connection = new Connection(
+  process.env.NEXT_PUBLIC_SOLANA_RPC_URL || clusterApiUrl('mainnet-beta'),
+  'confirmed'
+);
 
-export function connectWallet(): string {
-  const fakeAddress = "CVau" + Math.random().toString(36).substring(2, 10) + "..." + Math.random().toString(36).substring(2, 6);
-  localStorage.setItem(WALLET_KEY, fakeAddress);
-  return fakeAddress;
-}
-
-export function disconnectWallet(): void {
-  localStorage.removeItem(WALLET_KEY);
-}
+export const PLATFORM_WALLET = 'BCiPx7CbD3ZrcETcGTEGjTWtCwAbotNPPmdqmB9zAseq';

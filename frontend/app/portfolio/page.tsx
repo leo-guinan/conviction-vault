@@ -1,22 +1,24 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { getWallet, connectWallet, disconnectWallet } from "@/lib/wallet";
+import { useWallet } from "@solana/wallet-adapter-react";
+import { useWalletModal } from "@solana/wallet-adapter-react-ui";
 import { fetchPositions, exitStake } from "@/lib/api";
 import { formatLabel } from "@/lib/tokens";
 
 export default function PortfolioPage() {
-  const [wallet, setWallet] = useState<string | null>(null);
+  const { publicKey, connected, disconnect } = useWallet();
+  const { setVisible } = useWalletModal();
   const [positions, setPositions] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [exitingId, setExitingId] = useState<string | null>(null);
 
+  const walletAddress = publicKey?.toString() || null;
+
   useEffect(() => {
-    const w = getWallet();
-    setWallet(w);
-    if (w) loadPositions(w);
-  }, []);
+    if (walletAddress) loadPositions(walletAddress);
+  }, [walletAddress]);
 
   async function loadPositions(address: string) {
     setLoading(true);
@@ -31,24 +33,12 @@ export default function PortfolioPage() {
     }
   }
 
-  function handleConnect() {
-    const addr = connectWallet();
-    setWallet(addr);
-    loadPositions(addr);
-  }
-
-  function handleDisconnect() {
-    disconnectWallet();
-    setWallet(null);
-    setPositions([]);
-  }
-
   async function handleExit(stakeId: string) {
-    if (!wallet) return;
+    if (!walletAddress) return;
     setExitingId(stakeId);
     try {
-      await exitStake({ stake_id: stakeId, staker_address: wallet });
-      await loadPositions(wallet);
+      await exitStake({ stake_id: stakeId, staker_address: walletAddress });
+      await loadPositions(walletAddress);
     } catch {
       alert("Exit failed. Please try again.");
     } finally {
@@ -56,13 +46,13 @@ export default function PortfolioPage() {
     }
   }
 
-  if (!wallet) {
+  if (!connected || !walletAddress) {
     return (
       <div className="text-center py-20">
         <h1 className="text-3xl font-bold text-white mb-4">Your Portfolio</h1>
         <p className="text-gray-400 mb-6">Connect your wallet to view your stakes and yield.</p>
         <button
-          onClick={handleConnect}
+          onClick={() => setVisible(true)}
           className="bg-indigo-600 hover:bg-indigo-500 text-white px-6 py-3 rounded-lg font-medium transition-colors cursor-pointer"
         >
           Connect Wallet
@@ -81,10 +71,10 @@ export default function PortfolioPage() {
       <div className="flex items-center justify-between mb-8">
         <div>
           <h1 className="text-3xl font-bold text-white mb-1">Your Portfolio</h1>
-          <p className="text-gray-400 text-sm font-mono">{wallet}</p>
+          <p className="text-gray-400 text-sm font-mono">{walletAddress}</p>
         </div>
         <button
-          onClick={handleDisconnect}
+          onClick={() => disconnect()}
           className="text-sm text-gray-400 hover:text-white transition-colors"
         >
           Disconnect

@@ -1,0 +1,51 @@
+services:
+  conviction-api:
+    build: .
+    container_name: conviction-api
+    restart: unless-stopped
+    ports:
+      - "3096:3096"
+    environment:
+      - PORT=3096
+      - DRY_RUN=true
+      - PLATFORM_SOLANA_WALLET=BCiPx7CbD3ZrcETcGTEGjTWtCwAbotNPPmdqmB9zAseq
+      - DRIP_TOKEN_MINT=EiW9cxqFuLfJbLGXL7vZ7rcqtFLmDf13ho5oE6YKBAGS
+    volumes:
+      - ./data:/app/data
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.conviction-api.rule=Host(`conviction.metaspn.network`) && PathPrefix(`/api`)"
+      - "traefik.http.routers.conviction-api.entrypoints=websecure"
+      - "traefik.http.routers.conviction-api.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.conviction-api.middlewares=conviction-strip"
+      - "traefik.http.middlewares.conviction-strip.stripprefix.prefixes=/api"
+      - "traefik.http.services.conviction-api.loadbalancer.server.port=3096"
+    networks:
+      - traefik_proxy
+
+  conviction-frontend:
+    image: node:22-alpine
+    container_name: conviction-frontend
+    restart: unless-stopped
+    working_dir: /app
+    command: sh -c "npm install && npm run build && npm start"
+    ports:
+      - "3097:3000"
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_API_URL=https://conviction.metaspn.network/api
+      - PORT=3000
+    volumes:
+      - ./frontend:/app
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.conviction.rule=Host(`conviction.metaspn.network`)"
+      - "traefik.http.routers.conviction.entrypoints=websecure"
+      - "traefik.http.routers.conviction.tls.certresolver=letsencrypt"
+      - "traefik.http.services.conviction.loadbalancer.server.port=3000"
+    networks:
+      - traefik_proxy
+
+networks:
+  traefik_proxy:
+    external: true
