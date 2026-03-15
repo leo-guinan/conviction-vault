@@ -24,11 +24,11 @@ services:
       - traefik_proxy
 
   conviction-frontend:
-    image: node:22-alpine
+    image: node:22
     container_name: conviction-frontend
     restart: unless-stopped
     working_dir: /app
-    command: sh -c "npm install && npm run build && npm start"
+    command: sh -c "npm ci --omit=dev && npm start"
     ports:
       - "3097:3000"
     environment:
